@@ -23,6 +23,7 @@ const context = await esbuild.context({
 		"electron",
 		"chromium-bidi/lib/cjs/bidiMapper/bidiMapper.js",
 		"emitter",
+		"fsevents",
 		"@codemirror/autocomplete",
 		"@codemirror/collab",
 		"@codemirror/commands",

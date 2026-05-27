@@ -2,6 +2,7 @@ import marpCli, { CLIError, CLIErrorCode } from '@marp-team/marp-cli'
 import { TFile, App } from 'obsidian';
 import { MarpSlidesSettings } from './settings';
 import { FilePath } from './filePath';
+import { appendMobileTouchNavigation, embedHTMLImages } from './htmlEmbed';
 import { writeFileSync, readFileSync } from 'fs-extra';
 
 export class MarpCLIError extends Error {}
@@ -22,17 +23,21 @@ export class MarpExport {
         await filesTool.copyFileToRoot(file);
         const completeFilePath = filesTool.getCompleteFilePath(file);
         const themePath = filesTool.getThemePath(file);
+        const builtInThemePaths = filesTool.getBuiltInThemePaths(file.vault);
         const resourcesPath = filesTool.getLibDirectory(file.vault);
         const marpEngineConfig = filesTool.getMarpEngine(file.vault);
+        let originalContent: string | null = null;
+        let htmlEmbeddedOutputPath = '';
 
-        // Convert wiki-link images to standard markdown before export
+        // Apply Obsidian image and presentation preprocessing before export
         if (this.app && completeFilePath != '') {
             try {
-                const originalContent = readFileSync(completeFilePath, 'utf-8');
-                const processedContent = filesTool.convertImageWikiLinks(originalContent, file, this.app);
+                originalContent = readFileSync(completeFilePath, 'utf-8');
+                const processedContent = filesTool.preprocessMarkdown(originalContent, file, this.app);
+
                 writeFileSync(completeFilePath, processedContent, 'utf-8');
             } catch (e) {
-                console.error('Failed to process wiki-links for export:', e);
+                console.error('Failed to preprocess markdown for export:', e);
             }
         }
 
@@ -46,6 +51,11 @@ export class MarpExport {
                 argv.push('--engine');
                 argv.push(marpEngineConfig);
             }
+
+            builtInThemePaths.forEach((builtInThemePath) => {
+                argv.push('--theme-set');
+                argv.push(builtInThemePath);
+            });
 
             if (themePath != ''){
                 argv.push('--theme-set');
@@ -89,6 +99,14 @@ export class MarpExport {
                     argv.push('--template');
                     argv.push(this.settings.HTMLExportMode);
                     break;
+                case 'html-embedded':
+                    htmlEmbeddedOutputPath = filesTool.getExportFilePath(file, 'html', '.single');
+                    argv.push('--html');
+                    argv.push('--template');
+                    argv.push(this.settings.HTMLExportMode);
+                    argv.push('-o');
+                    argv.push(htmlEmbeddedOutputPath);
+                    break;
                 case 'preview':
                     argv.push('--html');
                     argv.push('--preview');
@@ -106,8 +124,20 @@ export class MarpExport {
                     
                     //argv.push('--watch');
             }
-            await this.run(argv, resourcesPath);
-        } 
+            try {
+                await this.run(argv, resourcesPath);
+
+                if (type === 'html-embedded' && htmlEmbeddedOutputPath != '' && this.app) {
+                    const html = readFileSync(htmlEmbeddedOutputPath, 'utf-8');
+                    const embeddedHTML = await embedHTMLImages(html, file, this.app, this.settings);
+                    writeFileSync(htmlEmbeddedOutputPath, appendMobileTouchNavigation(embeddedHTML), 'utf-8');
+                }
+            } finally {
+                if (originalContent != null) {
+                    writeFileSync(completeFilePath, originalContent, 'utf-8');
+                }
+            }
+        }
 
     }
 
@@ -118,7 +148,7 @@ export class MarpExport {
         try {
             process.env.CHROME_PATH = this.settings.CHROME_PATH || CHROME_PATH;
 
-            this.runMarpCli(argv, resourcesPath);
+            await this.runMarpCli(argv, resourcesPath);
             
         } catch (e) {
             console.error(e)

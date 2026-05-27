@@ -4,6 +4,7 @@ import { MARP_PREVIEW_VIEW, MarpPreviewView } from './views/marpPreviewView';
 import { MarpExport } from './utilities/marpExport';
 import { ICON_SLIDE_PREVIEW, ICON_EXPORT_PDF, ICON_EXPORT_PPTX, ICON_SLIDE_PRESENT } from './utilities/icons';
 import { Libs } from './utilities/libs';
+import { BUILT_IN_THEMES, BUILT_IN_THEME_NONE } from './utilities/builtInThemes';
 import { MarpSlidesSettings, DEFAULT_SETTINGS } from 'utilities/settings';
 
 
@@ -54,6 +55,12 @@ export default class MarpSlides extends Plugin {
 			id: 'export-html',
 			name: 'Export HTML',
 			callback: (() => this.exportFile('html'))
+		});
+
+		this.addCommand({
+			id: 'export-html-embedded',
+			name: 'Export HTML (single file)',
+			callback: (() => this.exportFile('html-embedded'))
 		});
 
 		this.addCommand({
@@ -186,8 +193,22 @@ export class MarpSlidesSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
+			.setName('Built-in Theme')
+			.setDesc('Select a bundled theme to apply to slide previews and exports. Markdown/frontmatter keeps the theme directive in each note.')
+			.addDropdown(dropdown => {
+				dropdown.addOption(BUILT_IN_THEME_NONE, 'Markdown/frontmatter');
+				BUILT_IN_THEMES.forEach((theme) => dropdown.addOption(theme.name, theme.label));
+				dropdown
+					.setValue(this.plugin.settings.BuiltInTheme)
+					.onChange(async (value) => {
+						this.plugin.settings.BuiltInTheme = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
 			.setName('Export Path')
-			.setDesc('Sets the custom path to export PDF, PPTX, and images. If it\'s empty, Marp will export in the same folder of the note. Export path does not affect HTML export')
+			.setDesc('Sets the custom path to export PDF, PPTX, images, and single-file HTML. If it\'s empty, Marp will export in the same folder of the note. Export path does not affect regular HTML export')
 			.addText(text => text
 				.setPlaceholder('C:\\Users\\user\\Downloads\\')
 				.setValue(this.plugin.settings.EXPORT_PATH)
@@ -229,7 +250,45 @@ export class MarpSlidesSettingTab extends PluginSettingTab {
 					this.plugin.settings.HTMLExportMode = value;
 					await this.plugin.saveSettings();
 				}));
-		
+
+		new Setting(containerEl)
+			.setName('Single-file HTML WebP conversion')
+			.setDesc('Convert large PNG/JPEG images to WebP when exporting single-file HTML. If conversion is unavailable or larger, original images are embedded.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.EmbeddedHTMLConvertImagesToWebP)
+				.onChange(async (value) => {
+					this.plugin.settings.EmbeddedHTMLConvertImagesToWebP = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Single-file HTML WebP threshold')
+			.setDesc('Minimum PNG/JPEG size in KB before attempting WebP conversion.')
+			.addText(text => text
+				.setPlaceholder('512')
+				.setValue(String(this.plugin.settings.EmbeddedHTMLWebPThresholdKB))
+				.onChange(async (value) => {
+					const threshold = Number(value);
+					if (!Number.isNaN(threshold) && threshold >= 0) {
+						this.plugin.settings.EmbeddedHTMLWebPThresholdKB = threshold;
+						await this.plugin.saveSettings();
+					}
+				}));
+
+		new Setting(containerEl)
+			.setName('Single-file HTML WebP quality')
+			.setDesc('WebP conversion quality from 0.1 to 1.0.')
+			.addText(text => text
+				.setPlaceholder('0.82')
+				.setValue(String(this.plugin.settings.EmbeddedHTMLWebPQuality))
+				.onChange(async (value) => {
+					const quality = Number(value);
+					if (!Number.isNaN(quality) && quality >= 0.1 && quality <= 1) {
+						this.plugin.settings.EmbeddedHTMLWebPQuality = quality;
+						await this.plugin.saveSettings();
+					}
+				}));
+
 		new Setting(containerEl)
 			.setName('Sync Preview')
 			.setDesc('(Experimental) Sync the slide preview with the editor cursor')

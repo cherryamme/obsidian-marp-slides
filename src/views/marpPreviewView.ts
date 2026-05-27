@@ -5,6 +5,7 @@ import { browser, type MarpCoreBrowser } from '@marp-team/marp-core/browser'
 import { MarpSlidesSettings } from '../utilities/settings'
 import { MarpExport } from '../utilities/marpExport';
 import { FilePath } from '../utilities/filePath'
+import { BUILT_IN_THEMES } from '../utilities/builtInThemes'
 import { MathOptions } from '@marp-team/marp-core/types/src/math/math';
 
 const markdownItContainer = require('markdown-it-container');
@@ -62,7 +63,11 @@ export class MarpPreviewView extends ItemView  {
         container.empty();
         this.marpBrowser = browser(container);
 
-        if (this.settings.ThemePath != '') {        
+        BUILT_IN_THEMES.forEach((theme) => {
+            this.marp.themeSet.add(theme.css);
+        });
+
+        if (this.settings.ThemePath != '') {
             const fileContents: string[] = await Promise.all(
                 this.app.vault.getFiles()
                     .filter(x => x.parent?.path == normalizePath(this.settings.ThemePath))
@@ -109,6 +114,12 @@ export class MarpPreviewView extends ItemView  {
             }
         });
 
+        this.addAction('file-code', 'Export as single HTML', () => {
+            if (this.file) {
+                marpCli.export(this.file, 'html-embedded');
+            }
+        });
+
         this.addAction('slides-marp-export-pdf', 'Export as PDF', () => {
             if (this.file) {
                 marpCli.export(this.file, 'pdf');
@@ -136,8 +147,7 @@ export class MarpPreviewView extends ItemView  {
             const basePath = filePath.getCompleteFileBasePath(view.file);
             const markdownText = view.data;
 
-            // Convert wiki-link images to standard markdown
-            const processedMarkdown = filePath.convertImageWikiLinks(markdownText, view.file, this.app);
+            const processedMarkdown = filePath.preprocessMarkdown(markdownText, view.file, this.app);
 
             const container = this.containerEl.children[1];
             container.empty();
