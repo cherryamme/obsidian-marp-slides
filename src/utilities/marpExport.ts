@@ -3,8 +3,10 @@ import { TFile, App } from 'obsidian';
 import { MarpSlidesSettings } from './settings';
 import { FilePath } from './filePath';
 import { appendMobileTouchNavigation, appendPresentationAnnotations, embedHTMLImages } from './htmlEmbed';
-import { writeFileSync, readFileSync } from 'fs-extra';
+import { mkdtempSync } from 'fs';
+import { writeFileSync, readFileSync, removeSync } from 'fs-extra';
 import { dirname, join } from 'path';
+import { tmpdir } from 'os';
 
 export class MarpCLIError extends Error {}
 
@@ -23,10 +25,7 @@ export class MarpExport {
         await filesTool.removeFileFromRoot(file);
         await filesTool.copyFileToRoot(file);
         const completeFilePath = filesTool.getCompleteFilePath(file);
-        const themePath = filesTool.getThemePath(file);
-        const builtInThemePaths = filesTool.getBuiltInThemePaths(file.vault);
         const resourcesPath = filesTool.getLibDirectory(file.vault);
-        const marpEngineConfig = filesTool.getMarpEngine(file.vault);
         let originalContent: string | null = null;
         let htmlEmbeddedOutputPath = '';
         let htmlOutputPath = '';
@@ -46,23 +45,8 @@ export class MarpExport {
         if (completeFilePath != ''){
             //console.log(completeFilePath);
 
-            const argv: string[] = [completeFilePath,'--allow-local-files'];
+            const argv = this.buildMarpCliArgv(file, filesTool, completeFilePath);
             //const argv: string[] = ['--engine', '@marp-team/marp-core', completeFilePath,'--allow-local-files'];
-
-            if (this.settings.EnableMarkdownItPlugins){
-                argv.push('--engine');
-                argv.push(marpEngineConfig);
-            }
-
-            builtInThemePaths.forEach((builtInThemePath) => {
-                argv.push('--theme-set');
-                argv.push(builtInThemePath);
-            });
-
-            if (themePath != ''){
-                argv.push('--theme-set');
-                argv.push(themePath);
-            }
 
             switch (type) {
                 case 'pdf':
@@ -136,14 +120,7 @@ export class MarpExport {
                 }
 
                 if (type === 'html-embedded' && htmlEmbeddedOutputPath != '') {
-                    let processedHTML = readFileSync(htmlEmbeddedOutputPath, 'utf-8');
-
-                    if (this.app) {
-                        processedHTML = await embedHTMLImages(processedHTML, file, this.app, this.settings);
-                    }
-
-                    processedHTML = appendMobileTouchNavigation(processedHTML);
-                    processedHTML = appendPresentationAnnotations(processedHTML);
+                    const processedHTML = await this.postProcessEmbeddedHtml(readFileSync(htmlEmbeddedOutputPath, 'utf-8'), file);
                     writeFileSync(htmlEmbeddedOutputPath, processedHTML, 'utf-8');
                 }
             } finally {
@@ -155,15 +132,80 @@ export class MarpExport {
 
     }
 
+    async generateEmbeddedHtml(file: TFile, markdownOverride?: string): Promise<string> {
+        if (!this.app) {
+            throw new MarpCLIError('Cannot generate preview HTML without an Obsidian app instance.');
+        }
+
+        const filesTool = new FilePath(this.settings);
+        const resourcesPath = filesTool.getLibDirectory(file.vault);
+        const tempDirectory = mkdtempSync(join(tmpdir(), 'marp-slides-preview-'));
+        const markdownPath = join(tempDirectory, file.name);
+        const htmlPath = join(tempDirectory, `${file.basename}.single.html`);
+
+        try {
+            const markdown = markdownOverride ?? await this.app.vault.cachedRead(file);
+            const processedMarkdown = filesTool.preprocessMarkdown(markdown, file, this.app);
+            writeFileSync(markdownPath, processedMarkdown, 'utf-8');
+
+            const argv = this.buildMarpCliArgv(file, filesTool, markdownPath);
+            argv.push('--html');
+            argv.push('--template');
+            argv.push(this.settings.HTMLExportMode);
+            argv.push('-o');
+            argv.push(htmlPath);
+
+            await this.run(argv, resourcesPath, true);
+            return this.postProcessEmbeddedHtml(readFileSync(htmlPath, 'utf-8'), file);
+        } finally {
+            removeSync(tempDirectory);
+        }
+    }
+
+    private buildMarpCliArgv(file: TFile, filesTool: FilePath, inputPath: string): string[] {
+        const argv: string[] = [inputPath, '--allow-local-files'];
+        const marpEngineConfig = filesTool.getMarpEngine(file.vault);
+        const builtInThemePaths = filesTool.getBuiltInThemePaths(file.vault);
+        const themePath = filesTool.getThemePath(file);
+
+        if (this.settings.EnableMarkdownItPlugins){
+            argv.push('--engine');
+            argv.push(marpEngineConfig);
+        }
+
+        builtInThemePaths.forEach((builtInThemePath) => {
+            argv.push('--theme-set');
+            argv.push(builtInThemePath);
+        });
+
+        if (themePath != ''){
+            argv.push('--theme-set');
+            argv.push(themePath);
+        }
+
+        return argv;
+    }
+
+    private async postProcessEmbeddedHtml(html: string, file: TFile): Promise<string> {
+        let processedHTML = html;
+
+        if (this.app) {
+            processedHTML = await embedHTMLImages(processedHTML, file, this.app, this.settings);
+        }
+
+        processedHTML = appendMobileTouchNavigation(processedHTML);
+        return appendPresentationAnnotations(processedHTML);
+    }
+
     //async exportPdf(argv: string[], opts?: MarpCLIAPIOptions | undefined){
-    private async run(argv: string[], resourcesPath: string){
+    private async run(argv: string[], resourcesPath: string, throwOnFailure = false){
         const { CHROME_PATH } = process.env;
 
         try {
             process.env.CHROME_PATH = this.settings.CHROME_PATH || CHROME_PATH;
 
-            await this.runMarpCli(argv, resourcesPath);
-            
+            await this.runMarpCli(argv, resourcesPath, throwOnFailure);
+
         } catch (e) {
             console.error(e)
 
@@ -191,17 +233,22 @@ export class MarpExport {
         }
     }
 
-    private async runMarpCli(argv: string[], resourcesPath: string) {
+    private async runMarpCli(argv: string[], resourcesPath: string, throwOnFailure = false) {
         //console.info(`Execute Marp CLI [${argv.join(' ')}] (${JSON.stringify(opts)})`)
         console.info(`Execute Marp CLI [${argv.join(' ')}]`);
         let temp__dirname = __dirname;
 
-        try {    
+        try {
             __dirname = resourcesPath;
             const exitCode = await marpCli(argv, {});
 
             if (exitCode > 0) {
-                console.error(`Failure (Exit status: ${exitCode})`)
+                const message = `Failure (Exit status: ${exitCode})`;
+                console.error(message)
+
+                if (throwOnFailure) {
+                    throw new MarpCLIError(message);
+                }
             }
         } catch(e) {
             if (e instanceof CLIError){
@@ -209,8 +256,12 @@ export class MarpExport {
             } else {
                 console.error("Generic Error!");
             }
-        }
 
-        __dirname = temp__dirname;
+            if (throwOnFailure) {
+                throw e;
+            }
+        } finally {
+            __dirname = temp__dirname;
+        }
     }
 }

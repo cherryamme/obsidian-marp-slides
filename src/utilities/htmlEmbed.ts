@@ -257,7 +257,7 @@ body.marp-slides-viewport-pan-enabled,
   cursor: crosshair;
 }
 .marp-slides-annotation-canvas[data-tool="laser"] {
-  cursor: none;
+  cursor: crosshair;
 }
 .marp-slides-annotation-toolbar {
   position: fixed;
