@@ -13,6 +13,10 @@ export default class MarpSlides extends Plugin {
 	public settings: MarpSlidesSettings;
 	private slidesView : MarpPreviewView;
 	private editorView : MarkdownView | null;
+	private editorScrollTarget: HTMLElement | null = null;
+	private editorScrollHandler: ((event: Event) => void) | null = null;
+	private editorScrollFrame = 0;
+	private previewedFilePath: string | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -88,9 +92,12 @@ export default class MarpSlides extends Plugin {
 			this.registerEditorSuggest(new LineSelectionListener(this.app, this));
 
 		this.registerEvent(this.app.vault.on('modify', this.onChange.bind(this)));
+		this.registerEvent(this.app.workspace.on('active-leaf-change', () => { this.syncPreviewToActiveMarkdown(); }));
+		this.registerEvent(this.app.workspace.on('file-open', () => { this.syncPreviewToActiveMarkdown(); }));
 	}
 
 	onunload() {
+		this.unbindEditorScrollSync();
 		this.app.workspace.detachLeavesOfType(MARP_PREVIEW_VIEW);
 	}
 
@@ -102,9 +109,11 @@ export default class MarpSlides extends Plugin {
 		await this.saveData(this.settings);
 	}
 
-	onChange(file: TAbstractFile) {
-		if (file == this.editorView?.file) {
-			this.slidesView.onChange(this.editorView);
+	async onChange(file: TAbstractFile) {
+		if (file == this.editorView?.file && this.slidesView) {
+			await this.slidesView.onChange(this.editorView);
+			this.previewedFilePath = this.editorView.file?.path || null;
+			this.syncPreviewToEditorCursor();
 		}
 	}
 
@@ -124,9 +133,28 @@ export default class MarpSlides extends Plugin {
 		}
 
 		this.slidesView = await this.activateView();
-		this.slidesView.displaySlides(this.editorView);
+		await this.slidesView.displaySlides(this.editorView);
+		this.previewedFilePath = this.editorView.file?.path || null;
+		this.bindEditorScrollSync();
+		this.syncPreviewToEditorCursor();
 	}
 	
+	async syncPreviewToActiveMarkdown() {
+		const activeEditorView = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!activeEditorView?.file) return;
+
+		const slidesView = this.getOpenPreviewView();
+		if (!slidesView) return;
+		if (this.previewedFilePath === activeEditorView.file.path && this.editorView === activeEditorView) return;
+
+		this.editorView = activeEditorView;
+		this.slidesView = slidesView;
+		await this.slidesView.displaySlides(this.editorView);
+		this.previewedFilePath = this.editorView.file?.path || null;
+		this.bindEditorScrollSync();
+		this.syncPreviewToEditorCursor();
+	}
+
 	async activateView() : Promise<MarpPreviewView> {
 		this.app.workspace.detachLeavesOfType(MARP_PREVIEW_VIEW);
 	
@@ -140,6 +168,60 @@ export default class MarpSlides extends Plugin {
 		this.app.workspace.revealLeaf(leaf);
 
 		return leaf.view as MarpPreviewView;
+	}
+
+	syncPreviewToEditorCursor() {
+		if (!this.editorView || !this.slidesView) return;
+
+		const cursor = this.editorView.editor.getCursor();
+		const slideIndex = getMarpSlideIndexForLine(this.editorView.editor.getValue(), cursor.line);
+		this.slidesView.onLineChanged(slideIndex);
+	}
+
+	syncPreviewToEditorScroll() {
+		if (!this.editorView || !this.slidesView) return;
+
+		const line = getEditorTopVisibleLine(this.editorView.editor, this.editorScrollTarget);
+		const slideIndex = getMarpSlideIndexForLine(this.editorView.editor.getValue(), line);
+		this.slidesView.onLineChanged(slideIndex);
+	}
+
+	bindEditorScrollSync() {
+		if (!this.editorView || !this.settings.EnableSyncPreview) return;
+
+		const scrollTarget = getEditorScrollElement(this.editorView);
+		if (!scrollTarget || scrollTarget === this.editorScrollTarget) return;
+
+		this.unbindEditorScrollSync();
+		this.editorScrollHandler = () => {
+			if (this.editorScrollFrame) return;
+
+			this.editorScrollFrame = window.requestAnimationFrame(() => {
+				this.editorScrollFrame = 0;
+				this.syncPreviewToEditorScroll();
+			});
+		};
+		this.editorScrollTarget = scrollTarget;
+		scrollTarget.addEventListener('scroll', this.editorScrollHandler, { passive: true });
+	}
+
+	unbindEditorScrollSync() {
+		if (this.editorScrollTarget && this.editorScrollHandler) {
+			this.editorScrollTarget.removeEventListener('scroll', this.editorScrollHandler);
+		}
+
+		if (this.editorScrollFrame) {
+			window.cancelAnimationFrame(this.editorScrollFrame);
+		}
+
+		this.editorScrollTarget = null;
+		this.editorScrollHandler = null;
+		this.editorScrollFrame = 0;
+	}
+
+	getOpenPreviewView(): MarpPreviewView | null {
+		const leaf = this.app.workspace.getLeavesOfType(MARP_PREVIEW_VIEW)[0];
+		return leaf ? leaf.view as MarpPreviewView : null;
 	}
 
 	getViewInstance(): MarpPreviewView | null {
@@ -311,6 +393,80 @@ export class MarpSlidesSettingTab extends PluginSettingTab {
 	}
 }
 
+function getEditorScrollElement(view: MarkdownView): HTMLElement | null {
+	return view.containerEl.querySelector('.cm-scroller')
+		|| view.containerEl.querySelector('.CodeMirror-scroll');
+}
+
+function getEditorTopVisibleLine(editor: Editor, scrollTarget: HTMLElement | null): number {
+	const codeMirrorView = (editor as any).cm;
+	const scrollTop = codeMirrorView?.scrollDOM?.scrollTop ?? scrollTarget?.scrollTop ?? editor.getScrollInfo().top;
+
+	if (typeof codeMirrorView?.lineBlockAtHeight === 'function' && codeMirrorView.state?.doc) {
+		const block = codeMirrorView.lineBlockAtHeight(scrollTop);
+		return Math.max(0, codeMirrorView.state.doc.lineAt(block.from).number - 1);
+	}
+
+	if (typeof codeMirrorView?.coordsChar === 'function' && scrollTarget) {
+		const rect = scrollTarget.getBoundingClientRect();
+		const position = codeMirrorView.coordsChar({ left: rect.left + 1, top: rect.top + 1 }, 'window');
+		if (position && typeof position.line === 'number') {
+			return Math.max(0, position.line);
+		}
+	}
+
+	const lineHeight = scrollTarget ? Number.parseFloat(getComputedStyle(scrollTarget).lineHeight) : 0;
+	return Math.max(0, Math.floor(scrollTop / (lineHeight || 20)));
+}
+
+function getMarpSlideIndexForLine(markdown: string, cursorLine: number): number {
+	const lines = markdown.split(/\r?\n/);
+	const targetLine = Math.max(0, Math.min(cursorLine, lines.length));
+	const frontMatterEndLine = getFrontMatterEndLine(lines);
+	let slideIndex = 0;
+	let fence: { marker: string; length: number } | null = null;
+
+	for (let lineIndex = 0; lineIndex < targetLine; lineIndex++) {
+		if (frontMatterEndLine > 0 && lineIndex === 0) {
+			lineIndex = frontMatterEndLine;
+			continue;
+		}
+
+		const line = lines[lineIndex];
+		const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+
+		if (fence) {
+			if (fenceMatch && fenceMatch[1][0] === fence.marker && fenceMatch[1].length >= fence.length) {
+				fence = null;
+			}
+			continue;
+		}
+
+		if (fenceMatch) {
+			fence = { marker: fenceMatch[1][0], length: fenceMatch[1].length };
+			continue;
+		}
+
+		if (/^\s*---\s*$/.test(line)) {
+			slideIndex++;
+		}
+	}
+
+	return slideIndex;
+}
+
+function getFrontMatterEndLine(lines: string[]): number {
+	if (!/^---\s*$/.test(lines[0] || '')) return -1;
+
+	for (let lineIndex = 1; lineIndex < lines.length; lineIndex++) {
+		if (/^---\s*$/.test(lines[lineIndex])) {
+			return lineIndex;
+		}
+	}
+
+	return -1;
+}
+
 class LineSelectionListener extends EditorSuggest<string> {
 	private plugin: MarpSlides;
 
@@ -328,20 +484,7 @@ class LineSelectionListener extends EditorSuggest<string> {
         const instance = this.plugin.getViewInstance();
 
 		if (instance) {
-			const lines = editor.getValue().split('\n');
-			const firstNLines = lines.slice(0, cursor.line);
-			const text = firstNLines.join('\n');
-			
-			const regex = new RegExp('---', 'g');
-			let matches = text.match(regex);
-			let slide = matches ? matches.length : 0;
-			var matter = require('gray-matter');
-			const frontMatter = matter(text);
-			if (frontMatter.data !== null && Object.keys(frontMatter.data).length > 0) {
-				instance.onLineChanged(slide - 2);
-			} else {
-				instance.onLineChanged(slide);
-			}			
+			instance.onLineChanged(getMarpSlideIndexForLine(editor.getValue(), cursor.line));
 		}
 		return null;
 	}

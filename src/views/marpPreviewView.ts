@@ -6,6 +6,7 @@ import { MarpSlidesSettings } from '../utilities/settings'
 import { MarpExport } from '../utilities/marpExport';
 import { FilePath } from '../utilities/filePath'
 import { BUILT_IN_THEMES } from '../utilities/builtInThemes'
+import { mountPresentationAnnotations, resolveMarkdownImageResourcePaths } from '../utilities/htmlEmbed';
 import { MathOptions } from '@marp-team/marp-core/types/src/math/math';
 
 const markdownItContainer = require('markdown-it-container');
@@ -92,11 +93,19 @@ export class MarpPreviewView extends ItemView  {
     }
 
     async onLineChanged(line: number) {
-        try {
-		    this.containerEl.children[1].children[2].children[line].scrollIntoView();
-        } catch {
-            console.log("Preview slide not found!")
+        const previewContainer = this.containerEl.children[1] as HTMLElement | undefined;
+        const slideRoot = previewContainer?.querySelector('#__marp-vscode') as HTMLElement | null;
+        const slides = Array.from(slideRoot?.children || [])
+            .filter((child): child is HTMLElement => child instanceof HTMLElement && child.hasAttribute('data-marp-vscode-slide-wrapper'));
+        const slideIndex = Math.max(0, Math.min(line, slides.length - 1));
+        const slide = slides[slideIndex];
+
+        if (!slide) {
+            console.log("Preview slide not found!");
+            return;
         }
+
+        slide.scrollIntoView({ block: 'start', inline: 'nearest' });
 	}
 
     async addActions() {
@@ -134,11 +143,27 @@ export class MarpPreviewView extends ItemView  {
 
         this.addAction('slides-marp-slide-present', 'Preview Slides', () => {
             if (this.file) {
-                marpCli.export(this.file, 'preview');
+                this.presentSlides();
             }
         });
       }
-    
+
+    private presentSlides() {
+        const container = this.containerEl.children[1] as HTMLElement | undefined;
+        const target = (container?.querySelector('#__marp-vscode') as HTMLElement | null) || container;
+
+        if (!target) return;
+
+        const requestFullscreen = target.requestFullscreen
+            || (target as any).webkitRequestFullscreen
+            || (target as any).mozRequestFullScreen
+            || (target as any).msRequestFullscreen;
+
+        if (requestFullscreen) {
+            requestFullscreen.call(target);
+        }
+    }
+
     async displaySlides(view : MarkdownView) {
 
         if (view.file != null) {
@@ -147,7 +172,7 @@ export class MarpPreviewView extends ItemView  {
             const basePath = filePath.getCompleteFileBasePath(view.file);
             const markdownText = view.data;
 
-            const processedMarkdown = filePath.preprocessMarkdown(markdownText, view.file, this.app);
+            const processedMarkdown = await resolveMarkdownImageResourcePaths(filePath.preprocessMarkdown(markdownText, view.file, this.app), view.file, this.app);
 
             const container = this.containerEl.children[1];
             container.empty();
@@ -156,7 +181,7 @@ export class MarpPreviewView extends ItemView  {
             let { html, css } = this.marp.render(processedMarkdown);
             
             // Replace Backgorund Url for images
-            html = html.replace(/(?!background-image:url\(&quot;http)background-image:url\(&quot;/g, `background-image:url(&quot;${basePath}`);
+            html = html.replace(/background-image:url\(&quot;(?![a-z][a-z0-9+.-]*:|\/)/gi, `background-image:url(&quot;${basePath}`);
 
             const htmlFile = `
                 <!DOCTYPE html>
@@ -171,6 +196,7 @@ export class MarpPreviewView extends ItemView  {
 
             container.innerHTML = htmlFile;
             this.marpBrowser?.update();
+            mountPresentationAnnotations(container as HTMLElement);
         }
         else
         {

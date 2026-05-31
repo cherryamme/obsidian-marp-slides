@@ -41,16 +41,8 @@ export class FilePath  {
 	}
 
 	public getCompleteFileBasePath(file: TFile): string{
-        let resourcePath = [""];
-        if(this.isAbsoluteLinkFormat(file)){
-            resourcePath = (file.vault.adapter as FileSystemAdapter).getResourcePath(normalizePath("/")).split("?");
-        }
-        else
-        {
-            if (file.parent != null){
-                resourcePath = (file.vault.adapter as FileSystemAdapter).getResourcePath(normalizePath(file.parent.path)).split("?");
-            }
-        }
+        const baseFolder = file.parent?.path ? normalizePath(file.parent.path) : normalizePath("/");
+        const resourcePath = (file.vault.adapter as FileSystemAdapter).getResourcePath(baseFolder).split("?");
         //console.log(`Complete File Base Path: ${resourcePath}`);
         return `${resourcePath[0]}/`;
 	}
@@ -137,6 +129,7 @@ export class FilePath  {
 
     public preprocessMarkdown(markdown: string, sourceFile: TFile, app: App): string {
         let processedMarkdown = this.convertImageWikiLinks(markdown, sourceFile, app);
+        processedMarkdown = this.applyTextImageSplitLayout(processedMarkdown);
         processedMarkdown = this.applySameLineImageLayout(processedMarkdown);
         processedMarkdown = this.convertImageSizeSyntax(processedMarkdown);
         processedMarkdown = this.applyPresentationDirectives(processedMarkdown);
@@ -183,6 +176,44 @@ export class FilePath  {
         });
     }
 
+    public applyTextImageSplitLayout(markdown: string): string {
+        return this.transformMarkdownLines(markdown, (line) => {
+            const images = [...line.matchAll(/!\[([^\]\n]*)\]\(([^)\n]+)\)/g)];
+
+            if (images.length === 0) {
+                return line;
+            }
+
+            const firstImage = images[0];
+            const lastImage = images[images.length - 1];
+            const beforeText = line.slice(0, firstImage.index ?? 0).trim();
+            const afterText = line.slice((lastImage.index ?? 0) + lastImage[0].length).trim();
+            const middleText = line.slice((firstImage.index ?? 0) + firstImage[0].length, lastImage.index ?? 0).trim();
+
+            if ((beforeText === '' && afterText === '') || (beforeText !== '' && afterText !== '') || middleText !== '') {
+                return line;
+            }
+
+            const hasExplicitWidth = images.some((image) => this.getImageExplicitWidth(image[1]) != null);
+
+            if (!hasExplicitWidth) {
+                const columnCount = images.length + 1;
+
+                return line.replace(/!\[([^\]\n]*)\]\(([^)\n]+)\)/g, (_match, altText, imagePath) => {
+                    const splitAlt = this.buildEqualTextImageAlt(altText, columnCount);
+                    return `![${splitAlt}](${imagePath})`;
+                });
+            }
+
+            const splitPosition = beforeText === '' ? 'split-left' : 'split-right';
+
+            return line.replace(/!\[([^\]\n]*)\]\(([^)\n]+)\)/g, (_match, altText, imagePath) => {
+                const splitAlt = this.buildTextImageSplitAlt(altText, this.getTextImageSplitWidth(altText), splitPosition);
+                return `![${splitAlt}](${imagePath})`;
+            });
+        });
+    }
+
     public applySameLineImageLayout(markdown: string): string {
         return this.transformMarkdownLines(markdown, (line) => {
             const images = [...line.matchAll(/!\[([^\]\n]*)\]\(([^)\n]+)\)/g)];
@@ -202,7 +233,28 @@ export class FilePath  {
         });
     }
 
-    private getImageLayoutWeight(altText: string): number {
+    private getTextImageSplitWidth(altText: string): number {
+        const explicitWidth = this.getImageExplicitWidth(altText);
+
+        if (explicitWidth != null) {
+            return explicitWidth;
+        }
+
+        return 5500;
+    }
+
+    private buildEqualTextImageAlt(altText: string, columnCount: number): string {
+        const cleanedAlt = this.cleanTextImageSplitAlt(altText);
+        const splitToken = `split-equal-${columnCount}`;
+
+        if (cleanedAlt === '' || /^\d+(?:\.\d+)?$/.test(cleanedAlt)) {
+            return splitToken;
+        }
+
+        return `${splitToken} ${cleanedAlt}`;
+    }
+
+    private getImageExplicitWidth(altText: string): number | null {
         const numericAlt = altText.trim().match(/^\d+(?:\.\d+)?$/);
 
         if (numericAlt) {
@@ -213,6 +265,33 @@ export class FilePath  {
 
         if (widthDirective) {
             return Number(widthDirective[1]);
+        }
+
+        return null;
+    }
+
+    private buildTextImageSplitAlt(altText: string, width: number, splitPosition: 'split-left' | 'split-right'): string {
+        const cleanedAlt = this.cleanTextImageSplitAlt(altText);
+
+        if (cleanedAlt === '' || /^\d+(?:\.\d+)?$/.test(cleanedAlt)) {
+            return `${splitPosition} w:${width}`;
+        }
+
+        return `${splitPosition} w:${width} ${cleanedAlt}`;
+    }
+
+    private cleanTextImageSplitAlt(altText: string): string {
+        return altText
+            .replace(/(^|\s)split-(?:equal-)?(?:left|right)(?=\s|$)/g, '$1')
+            .replace(/(^|\s)(?:w|width):\d+(?:\.\d+)?(?:px)?(?=\s|$)/g, '$1')
+            .trim();
+    }
+
+    private getImageLayoutWeight(altText: string): number {
+        const explicitWidth = this.getImageExplicitWidth(altText);
+
+        if (explicitWidth != null) {
+            return explicitWidth;
         }
 
         return 1;
@@ -252,12 +331,58 @@ export class FilePath  {
             processedMarkdown = this.appendFrontMatterStyle(processedMarkdown, `section > p:has(> img:nth-of-type(2)) {
   display: flex;
   flex-wrap: nowrap;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   gap: 0.75rem;
   width: 100%;
 }
 section > p:has(> img:nth-of-type(2)) > img {
+  flex-grow: 0;
+  flex-shrink: 1;
+  height: auto;
+  margin: 0;
+  max-width: none;
+  min-width: 0;
+  object-fit: contain;
+}`);
+        }
+
+        if (this.hasEqualTextImageSplit(processedMarkdown)) {
+            processedMarkdown = this.appendFrontMatterStyle(processedMarkdown, `section > p:has(> img[alt^="split-equal-"]) {
+  align-items: flex-start;
+  column-gap: 1rem;
+  display: grid;
+  width: 100%;
+}
+section > p:has(> img[alt^="split-equal-2"]) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+section > p:has(> img[alt^="split-equal-3"]) {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+section > p:has(> img[alt^="split-equal-4"]) {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+section > p:has(> img[alt^="split-equal-"]) > img[alt^="split-equal-"] {
+  display: block;
+  height: auto;
+  margin: 0 auto;
+  max-width: 100%;
+  min-width: 0;
+  object-fit: contain;
+  width: 100%;
+}`);
+        }
+
+        if (this.hasTextImageSplit(processedMarkdown)) {
+            processedMarkdown = this.appendFrontMatterStyle(processedMarkdown, `section > p:has(> img[alt^="split-"]) {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  width: 100%;
+}
+section > p:has(> img[alt^="split-"]) > img[alt^="split-left"],
+section > p:has(> img[alt^="split-"]) > img[alt^="split-right"] {
   flex-grow: 0;
   flex-shrink: 1;
   height: auto;
@@ -310,6 +435,14 @@ section > p:has(> img:nth-of-type(2)) > img {
         });
 
         return hasImageRow;
+    }
+
+    private hasEqualTextImageSplit(markdown: string): boolean {
+        return /!\[(?:[^\]\n]*\s)?split-equal-\d+(?:\s|])/.test(markdown);
+    }
+
+    private hasTextImageSplit(markdown: string): boolean {
+        return /!\[(?:[^\]\n]*\s)?split-(?:left|right)(?:\s|])/.test(markdown);
     }
 
     private setFrontMatterDirective(markdown: string, name: string, value: string): string {

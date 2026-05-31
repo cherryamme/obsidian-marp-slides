@@ -2,8 +2,9 @@ import marpCli, { CLIError, CLIErrorCode } from '@marp-team/marp-cli'
 import { TFile, App } from 'obsidian';
 import { MarpSlidesSettings } from './settings';
 import { FilePath } from './filePath';
-import { appendMobileTouchNavigation, embedHTMLImages } from './htmlEmbed';
+import { appendMobileTouchNavigation, appendPresentationAnnotations, embedHTMLImages } from './htmlEmbed';
 import { writeFileSync, readFileSync } from 'fs-extra';
+import { dirname, join } from 'path';
 
 export class MarpCLIError extends Error {}
 
@@ -28,9 +29,10 @@ export class MarpExport {
         const marpEngineConfig = filesTool.getMarpEngine(file.vault);
         let originalContent: string | null = null;
         let htmlEmbeddedOutputPath = '';
+        let htmlOutputPath = '';
 
         // Apply Obsidian image and presentation preprocessing before export
-        if (this.app && completeFilePath != '') {
+        if (this.app && completeFilePath != '' && type !== 'preview') {
             try {
                 originalContent = readFileSync(completeFilePath, 'utf-8');
                 const processedContent = filesTool.preprocessMarkdown(originalContent, file, this.app);
@@ -95,6 +97,7 @@ export class MarpExport {
                     }
                     break;
                 case 'html':
+                    htmlOutputPath = join(dirname(completeFilePath), `${file.basename}.html`);
                     argv.push('--html');
                     argv.push('--template');
                     argv.push(this.settings.HTMLExportMode);
@@ -127,10 +130,21 @@ export class MarpExport {
             try {
                 await this.run(argv, resourcesPath);
 
-                if (type === 'html-embedded' && htmlEmbeddedOutputPath != '' && this.app) {
-                    const html = readFileSync(htmlEmbeddedOutputPath, 'utf-8');
-                    const embeddedHTML = await embedHTMLImages(html, file, this.app, this.settings);
-                    writeFileSync(htmlEmbeddedOutputPath, appendMobileTouchNavigation(embeddedHTML), 'utf-8');
+                if (type === 'html' && htmlOutputPath != '') {
+                    const html = readFileSync(htmlOutputPath, 'utf-8');
+                    writeFileSync(htmlOutputPath, appendPresentationAnnotations(html), 'utf-8');
+                }
+
+                if (type === 'html-embedded' && htmlEmbeddedOutputPath != '') {
+                    let processedHTML = readFileSync(htmlEmbeddedOutputPath, 'utf-8');
+
+                    if (this.app) {
+                        processedHTML = await embedHTMLImages(processedHTML, file, this.app, this.settings);
+                    }
+
+                    processedHTML = appendMobileTouchNavigation(processedHTML);
+                    processedHTML = appendPresentationAnnotations(processedHTML);
+                    writeFileSync(htmlEmbeddedOutputPath, processedHTML, 'utf-8');
                 }
             } finally {
                 if (originalContent != null) {

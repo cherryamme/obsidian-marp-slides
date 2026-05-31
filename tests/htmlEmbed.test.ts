@@ -2,7 +2,7 @@ import { App, TFile } from 'obsidian';
 import { mkdtempSync, mkdirpSync, removeSync, writeFileSync } from 'fs-extra';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { appendMobileTouchNavigation, embedHTMLImages, embedMarkdownImages } from '../src/utilities/htmlEmbed';
+import { appendMobileTouchNavigation, appendPresentationAnnotations, embedHTMLImages, embedMarkdownImages, resolveMarkdownImageResourcePaths } from '../src/utilities/htmlEmbed';
 import { DEFAULT_SETTINGS } from '../src/utilities/settings';
 
 function createFakeApp(basePath: string): App {
@@ -10,6 +10,7 @@ function createFakeApp(basePath: string): App {
 		vault: {
 			adapter: {
 				getBasePath: () => basePath,
+				getResourcePath: (path: string) => `app://local/${path}`,
 			},
 		},
 		metadataCache: {
@@ -99,6 +100,40 @@ describe('embedMarkdownImages', () => {
 	});
 });
 
+describe('resolveMarkdownImageResourcePaths', () => {
+	let tempDir: string;
+	let app: App;
+	let sourceFile: TFile;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), 'marp-preview-image-path-'));
+		mkdirpSync(join(tempDir, 'slides', 'sub', 'images'));
+		app = createFakeApp(tempDir);
+		sourceFile = createFakeSourceFile('slides/sub/deck.md', 'slides/sub');
+	});
+
+	afterEach(() => {
+		removeSync(tempDir);
+	});
+
+	test('resolves relative image paths from the markdown file folder for preview', async () => {
+		writeFileSync(join(tempDir, 'slides', 'sub', 'images', 'logo.svg'), '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+
+		const result = await resolveMarkdownImageResourcePaths('![logo](images/logo.svg)', sourceFile, app);
+
+		expect(result).toBe('![logo](app://local/slides/sub/images/logo.svg)');
+	});
+
+	test('falls back to vault-root image paths for preview', async () => {
+		mkdirpSync(join(tempDir, 'attachments'));
+		writeFileSync(join(tempDir, 'attachments', 'logo.svg'), '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+
+		const result = await resolveMarkdownImageResourcePaths('![logo](attachments/logo.svg)', sourceFile, app);
+
+		expect(result).toBe('![logo](app://local/attachments/logo.svg)');
+	});
+});
+
 describe('embedHTMLImages', () => {
 	let tempDir: string;
 	let app: App;
@@ -146,8 +181,88 @@ describe('appendMobileTouchNavigation', () => {
 		const result = appendMobileTouchNavigation('<html><body></body></html>');
 
 		expect(result).toContain('marp-slides-mobile-touch-navigation');
-		expect(result).toContain('touchstart');
-		expect(result).toContain('ArrowDown');
+		expect(result).toContain('pinch-zoom');
 		expect(result).toContain('</body>');
+		expect(result).not.toContain('new KeyboardEvent');
+		expect(result).not.toContain('new WheelEvent');
+		expect(result).not.toContain('ArrowDown');
+	});
+});
+
+describe('appendPresentationAnnotations', () => {
+	test('adds annotation assets before body close', () => {
+		const result = appendPresentationAnnotations('<html><body></body></html>');
+
+		expect(result).toContain('marp-slides-presentation-annotations');
+		expect(result).toContain('marp-slides-annotation-canvas');
+		expect(result).toContain('Marker');
+		expect(result).toContain('Highlighter');
+		expect(result).toContain('Rectangle');
+		expect(result).toContain('Circle');
+		expect(result).toMatch(/rectangle:\s*{\s*label: 'Rectangle',\s*color: '#ff2b2b'/);
+		expect(result).toMatch(/circle:\s*{\s*label: 'Circle',\s*color: '#ff2b2b'/);
+		expect(result).toContain('Laser pointer');
+		expect(result).toContain('Clear annotations');
+		expect(result).toContain('innerHTML = tools[toolName].icon');
+		expect(result).toContain('button.innerHTML = clearIcon');
+		expect(result).toContain('button.title = getShortcutLabel');
+		expect(result).toContain("button.setAttribute('aria-label', getShortcutLabel");
+		expect(result).toContain('bindKeyboardShortcuts');
+		expect(result).toContain('event.key.toLowerCase()');
+		expect(result).toContain("pen: 'm'");
+		expect(result).toContain("highlighter: 'h'");
+		expect(result).toContain("rectangle: 'r'");
+		expect(result).toContain("circle: 'o'");
+		expect(result).toContain("laser: 'l'");
+		expect(result).toContain('Clear annotations');
+		expect(result).toContain('bindViewportWheelPanAndGestureGuard');
+		expect(result).toContain('bindMouseDragViewportPan');
+		expect(result).toContain('bindGestureNavigationGuard');
+		expect(result).toContain("runtimeWindow.addEventListener('wheel'");
+		expect(result).toContain('queueWheelPanFallback');
+		expect(result).toContain('getNestedWheelScroller(event.target)');
+		expect(result).toContain('canScrollWithWheel');
+		expect(result).toContain('canScrollAxis');
+		expect(result).toContain('runtimeWindow.scrollBy');
+		expect(result).toContain('event.stopPropagation()');
+		expect(result).toContain('event.stopImmediatePropagation()');
+		expect(result).toContain('event.preventDefault()');
+		expect(result).toContain('passive: true');
+		expect(result).toContain('marp-slides-laser-canvas');
+		expect(result).toContain('getCoalescedEvents');
+		expect(result).toContain('ctx.quadraticCurveTo');
+		expect(result).toContain('ctx.strokeRect');
+		expect(result).toContain('ctx.ellipse');
+		expect(result).toContain('undoStackBySlide');
+		expect(result).toContain('undoCurrentSlideChange');
+		expect(result).toContain("key === 'z'");
+		expect(result).toContain('event.ctrlKey');
+		expect(result).toContain('event.metaKey');
+		expect(result).toContain("action: 'clear'");
+		expect(result).not.toContain('Eraser');
+		expect(result.indexOf('marp-slides-presentation-annotations')).toBeLessThan(result.indexOf('</body>'));
+	});
+
+	test('does not inject annotation assets twice', () => {
+		const once = appendPresentationAnnotations('<html><body></body></html>');
+		const twice = appendPresentationAnnotations(once);
+
+		expect(twice).toBe(once);
+	});
+
+	test('includes bespoke toolbar integration logic', () => {
+		const result = appendPresentationAnnotations('<html><body><div class="bespoke-marp-osc"></div></body></html>');
+
+		expect(result).toContain("querySelectorAll('.bespoke-marp-osc')");
+		expect(result).toContain('marp-slides-annotation-controls');
+		expect(result).toContain('appendChild(createControlGroup())');
+	});
+
+	test('appends annotation assets when body close is missing', () => {
+		const html = '<html><body>';
+		const result = appendPresentationAnnotations(html);
+
+		expect(result.startsWith(html)).toBe(true);
+		expect(result).toContain('marp-slides-presentation-annotations');
 	});
 });
