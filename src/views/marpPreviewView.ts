@@ -98,10 +98,7 @@ export class MarpPreviewView extends ItemView  {
     }
 
     async onLineChanged(line: number) {
-        const previewContainer = this.containerEl.children[1] as HTMLElement | undefined;
-        const slideRoot = previewContainer?.querySelector('#__marp-vscode') as HTMLElement | null;
-        const slides = Array.from(slideRoot?.children || [])
-            .filter((child): child is HTMLElement => child instanceof HTMLElement && child.hasAttribute('data-marp-vscode-slide-wrapper'));
+        const slides = this.getPreviewSlides();
         const slideIndex = Math.max(0, Math.min(line, slides.length - 1));
         const slide = slides[slideIndex];
 
@@ -112,6 +109,34 @@ export class MarpPreviewView extends ItemView  {
 
         slide.scrollIntoView({ block: 'start', inline: 'nearest' });
 	}
+
+    private getPreviewSlides() {
+        const previewContainer = this.containerEl.children[1] as HTMLElement | undefined;
+        const slideRoot = previewContainer?.querySelector('#__marp-vscode') as HTMLElement | null;
+        return Array.from(slideRoot?.children || [])
+            .filter((child): child is HTMLElement => child instanceof HTMLElement && child.hasAttribute('data-marp-vscode-slide-wrapper'));
+    }
+
+    private getCurrentPreviewSlideIndex() {
+        const previewContainer = this.containerEl.children[1] as HTMLElement | undefined;
+        const slides = this.getPreviewSlides();
+
+        if (!previewContainer || slides.length === 0) return 0;
+
+        const containerTop = previewContainer.getBoundingClientRect().top;
+        let currentSlideIndex = 0;
+        let closestDistance = Number.POSITIVE_INFINITY;
+
+        slides.forEach((slide, index) => {
+            const distance = Math.abs(slide.getBoundingClientRect().top - containerTop);
+            if (distance < closestDistance) {
+                currentSlideIndex = index;
+                closestDistance = distance;
+            }
+        });
+
+        return currentSlideIndex;
+    }
 
     async addActions() {
         const marpCli = new MarpExport(this.settings, this.app);
@@ -156,6 +181,7 @@ export class MarpPreviewView extends ItemView  {
     private async presentSlides(marpCli: MarpExport) {
         if (!this.file) return;
 
+        const initialSlideIndex = this.getCurrentPreviewSlideIndex();
         this.stopPresentationMode(false);
         const requestId = ++this.presentationRequestId;
         const overlay = this.createPresentationOverlay();
@@ -215,7 +241,7 @@ export class MarpPreviewView extends ItemView  {
             }, { once: true });
 
             overlay.appendChild(iframe);
-            iframe.src = blobUrl;
+            iframe.src = `${blobUrl}#${initialSlideIndex + 1}`;
         } catch (error) {
             if (requestId !== this.presentationRequestId || this.presentationOverlay !== overlay) return;
 

@@ -191,6 +191,9 @@ function presentationAnnotationsRuntime(rootInput?: Document | HTMLElement): voi
 	let laserTrail: Array<{ x: number; y: number; time: number; startsStroke?: boolean }> = [];
 	let lastSlideKey = getSlideKey();
 	let viewportPan: { pointerId: number | null; startX: number; startY: number; scrollLeft: number; scrollTop: number; started: boolean } | null = null;
+	let touchViewportPan: { startX: number; startY: number; scrollLeft: number; scrollTop: number; started: boolean } | null = null;
+	let pinchZoom: { startDistance: number; startScale: number } | null = null;
+	let viewportZoomScale = 1;
 
 	bindViewportWheelPanAndGestureGuard();
 	bindMouseDragViewportPan();
@@ -287,6 +290,14 @@ body.marp-slides-viewport-pan-enabled,
 .bespoke-marp-osc {
   z-index: 2147483001 !important;
 }
+body[data-bespoke-view=""] .bespoke-marp-parent > .bespoke-marp-osc,
+body[data-bespoke-view=next] .bespoke-marp-parent > .bespoke-marp-osc {
+  position: fixed !important;
+  left: 50% !important;
+  right: auto !important;
+  bottom: 50px !important;
+  transform: translateX(-50%) !important;
+}
 body[data-marp-slides-annotation-active="true"] .bespoke-marp-parent.bespoke-marp-inactive {
   cursor: auto !important;
 }
@@ -361,10 +372,14 @@ body[data-marp-slides-annotation-active="true"] .bespoke-marp-parent.bespoke-mar
 			event.stopPropagation();
 			event.stopImmediatePropagation();
 
-			if (!event.ctrlKey) {
-				queueWheelPanFallback(event);
+			if (event.ctrlKey) {
+				event.preventDefault();
+				zoomViewportByWheel(event);
+				return;
 			}
-		}, { capture: true, passive: true });
+
+			queueWheelPanFallback(event);
+		}, { capture: true, passive: false });
 	}
 
 	function bindMouseDragViewportPan() {
@@ -443,18 +458,42 @@ body[data-marp-slides-annotation-active="true"] .bespoke-marp-parent.bespoke-mar
 
 			multiTouch = event.touches.length > 1;
 			singleTouchStarted = event.touches.length === 1;
+			pinchZoom = multiTouch ? getInitialPinchZoom(event.touches) : null;
+			touchViewportPan = singleTouchStarted && isViewportScrollable()
+				? getInitialTouchViewportPan(event.touches[0])
+				: null;
 		}, { capture: true, passive: true });
 
 		runtimeDocument.addEventListener('touchmove', (event) => {
 			if (!isEventInsideHost(event) || activeTool || isInteractiveTarget(event.target)) return;
 
-			if (multiTouch || event.touches.length > 1) {
+			if (event.touches.length > 1) {
+				multiTouch = true;
+				if (!pinchZoom) pinchZoom = getInitialPinchZoom(event.touches);
+				if (pinchZoom) {
+					const distance = getTouchDistance(event.touches);
+					const center = getTouchCenter(event.touches);
+					zoomViewport(pinchZoom.startScale * distance / pinchZoom.startDistance, center.x, center.y);
+				}
+
+				event.preventDefault();
+				event.stopPropagation();
+				event.stopImmediatePropagation();
+				return;
+			}
+
+			if (multiTouch) {
+				event.preventDefault();
 				event.stopPropagation();
 				event.stopImmediatePropagation();
 				return;
 			}
 
 			if (!singleTouchStarted) return;
+
+			if (touchViewportPan && event.touches.length === 1) {
+				panViewportWithTouch(event.touches[0]);
+			}
 
 			event.preventDefault();
 			event.stopPropagation();
@@ -464,9 +503,14 @@ body[data-marp-slides-annotation-active="true"] .bespoke-marp-parent.bespoke-mar
 		const endTouchGesture = (event: TouchEvent) => {
 			if (!isEventInsideHost(event) || activeTool || isInteractiveTarget(event.target)) return;
 
+			if (event.touches.length > 0) return;
+
 			if (multiTouch) {
 				multiTouch = false;
+				pinchZoom = null;
 				singleTouchStarted = false;
+				touchViewportPan = null;
+				event.preventDefault();
 				event.stopPropagation();
 				event.stopImmediatePropagation();
 				return;
@@ -479,6 +523,7 @@ body[data-marp-slides-annotation-active="true"] .bespoke-marp-parent.bespoke-mar
 			}
 
 			singleTouchStarted = false;
+			touchViewportPan = null;
 		};
 
 		runtimeDocument.addEventListener('touchend', endTouchGesture, { capture: true, passive: false });
@@ -488,9 +533,10 @@ body[data-marp-slides-annotation-active="true"] .bespoke-marp-parent.bespoke-mar
 			runtimeDocument.addEventListener(eventName, (event) => {
 				if (!isEventInsideHost(event)) return;
 
+				event.preventDefault();
 				event.stopPropagation();
 				event.stopImmediatePropagation();
-			}, { capture: true, passive: true });
+			}, { capture: true, passive: false });
 		});
 	}
 
@@ -570,6 +616,96 @@ body[data-marp-slides-annotation-active="true"] .bespoke-marp-parent.bespoke-mar
 		};
 	}
 
+	function zoomViewportByWheel(event: WheelEvent) {
+		const delta = normalizeWheelDelta(event);
+		const nextScale = viewportZoomScale * Math.exp(-delta.deltaY * 0.001);
+		zoomViewport(nextScale, event.clientX, event.clientY);
+	}
+
+	function zoomViewport(nextScale: number, clientX: number, clientY: number) {
+		nextScale = clampViewportZoomScale(nextScale);
+		if (Math.abs(nextScale - viewportZoomScale) < 0.001) return;
+
+		const scroller = getViewportScroller();
+		const oldScale = viewportZoomScale;
+		const contentX = (scroller.scrollLeft + clientX) / oldScale;
+		const contentY = (scroller.scrollTop + clientY) / oldScale;
+
+		viewportZoomScale = nextScale;
+		applyViewportZoomScale();
+		setViewportScroll(contentX * nextScale - clientX, contentY * nextScale - clientY);
+		resizeCanvas();
+	}
+
+	function clampViewportZoomScale(scale: number) {
+		return Math.min(4, Math.max(1, scale));
+	}
+
+	function applyViewportZoomScale() {
+		const zoomStyle = viewportZoomScale === 1 ? '' : `${viewportZoomScale * 100}%`;
+		(runtimeDocument.body.style as CSSStyleDeclaration & { zoom?: string }).zoom = '';
+		runtimeDocument.body.style.minWidth = viewportZoomScale === 1 ? '' : `${viewportZoomScale * 100}vw`;
+		runtimeDocument.body.style.minHeight = viewportZoomScale === 1 ? '' : `${viewportZoomScale * 100}vh`;
+
+		getZoomableSlides().forEach((slide) => {
+			slide.style.width = zoomStyle;
+			slide.style.height = zoomStyle;
+		});
+	}
+
+	function getZoomableSlides() {
+		return Array.from(queryRoot.querySelectorAll('.bespoke-marp-parent > svg.bespoke-marp-slide, .bespoke-marp-parent > svg[data-marpit-svg]'))
+			.filter((slide): slide is SVGSVGElement => slide instanceof SVGSVGElement);
+	}
+
+	function getInitialPinchZoom(touches: TouchList) {
+		if (touches.length < 2) return null;
+
+		const distance = getTouchDistance(touches);
+		if (distance <= 0) return null;
+
+		return { startDistance: distance, startScale: viewportZoomScale };
+	}
+
+	function getTouchDistance(touches: TouchList) {
+		if (touches.length < 2) return 0;
+
+		const first = touches[0];
+		const second = touches[1];
+		return Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY);
+	}
+
+	function getTouchCenter(touches: TouchList) {
+		const first = touches[0];
+		const second = touches[1];
+		return {
+			x: (first.clientX + second.clientX) / 2,
+			y: (first.clientY + second.clientY) / 2,
+		};
+	}
+
+	function getInitialTouchViewportPan(touch: Touch) {
+		const scroller = getViewportScroller();
+		return {
+			startX: touch.clientX,
+			startY: touch.clientY,
+			scrollLeft: scroller.scrollLeft,
+			scrollTop: scroller.scrollTop,
+			started: false,
+		};
+	}
+
+	function panViewportWithTouch(touch: Touch) {
+		if (!touchViewportPan) return;
+
+		const deltaX = touch.clientX - touchViewportPan.startX;
+		const deltaY = touch.clientY - touchViewportPan.startY;
+		if (!touchViewportPan.started && Math.hypot(deltaX, deltaY) < 3) return;
+
+		touchViewportPan.started = true;
+		panViewportBy(touchViewportPan.scrollLeft - deltaX - getViewportScroller().scrollLeft, touchViewportPan.scrollTop - deltaY - getViewportScroller().scrollTop);
+	}
+
 	function panViewportBy(deltaX: number, deltaY: number) {
 		if (!scopedHost) {
 			runtimeWindow.scrollBy({ left: deltaX, top: deltaY, behavior: 'auto' });
@@ -578,6 +714,17 @@ body[data-marp-slides-annotation-active="true"] .bespoke-marp-parent.bespoke-mar
 		getViewportScrollers().forEach((scroller) => {
 			scroller.scrollLeft += deltaX;
 			scroller.scrollTop += deltaY;
+		});
+	}
+
+	function setViewportScroll(left: number, top: number) {
+		if (!scopedHost) {
+			runtimeWindow.scrollTo({ left, top, behavior: 'auto' });
+		}
+
+		getViewportScrollers().forEach((scroller) => {
+			scroller.scrollLeft = left;
+			scroller.scrollTop = top;
 		});
 	}
 
@@ -597,7 +744,8 @@ body[data-marp-slides-annotation-active="true"] .bespoke-marp-parent.bespoke-mar
 
 	function isViewportScrollable() {
 		const scroller = getViewportScroller();
-		return scroller.scrollWidth > scroller.clientWidth
+		return viewportZoomScale > 1
+			|| scroller.scrollWidth > scroller.clientWidth
 			|| scroller.scrollHeight > scroller.clientHeight
 			|| ((runtimeWindow.visualViewport?.scale || 1) > 1);
 	}
