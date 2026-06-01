@@ -6,7 +6,7 @@ import { MarpSlidesSettings } from '../utilities/settings'
 import { MarpExport } from '../utilities/marpExport';
 import { FilePath } from '../utilities/filePath'
 import { BUILT_IN_THEMES } from '../utilities/builtInThemes'
-import { mountPresentationAnnotations, resolveMarkdownImageResourcePaths } from '../utilities/htmlEmbed';
+import { resolveMarkdownImageResourcePaths } from '../utilities/htmlEmbed';
 import { MathOptions } from '@marp-team/marp-core/types/src/math/math';
 
 const markdownItContainer = require('markdown-it-container');
@@ -312,7 +312,6 @@ export class MarpPreviewView extends ItemView  {
 
             container.innerHTML = htmlFile;
             this.marpBrowser?.update();
-            mountPresentationAnnotations(container as HTMLElement);
         }
         else
         {
