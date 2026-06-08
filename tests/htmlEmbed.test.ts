@@ -181,11 +181,30 @@ describe('appendMobileTouchNavigation', () => {
 		const result = appendMobileTouchNavigation('<html><body></body></html>');
 
 		expect(result).toContain('marp-slides-mobile-touch-navigation');
+		expect(result).toContain('.bespoke-marp-parent > .bespoke-marp-osc');
+		expect(result).toContain('touch-action: pan-x pan-y pinch-zoom !important');
+		expect(result).toContain('mobileViewRuntime');
+		expect(result).toContain('stopMarpTouchHandling');
+		expect(result).toContain('showControls');
+		expect(result).toContain('horizontalSwipeRatio');
+		expect(result).toContain('swipeDistance');
+		expect(result).toContain('(hover: none) and (pointer: coarse)');
 		expect(result).toContain('pinch-zoom');
+		expect(result).toContain('.marp-slides-annotation-controls');
+		expect(result).toContain('display: none !important');
+		expect(result).toContain('visualViewport');
+		expect(result).toContain('data-bespoke-marp-osc');
 		expect(result).toContain('</body>');
 		expect(result).not.toContain('new KeyboardEvent');
 		expect(result).not.toContain('new WheelEvent');
 		expect(result).not.toContain('ArrowDown');
+	});
+
+	test('does not inject touch navigation assets twice', () => {
+		const once = appendMobileTouchNavigation('<html><body></body></html>');
+		const twice = appendMobileTouchNavigation(once);
+
+		expect(twice).toBe(once);
 	});
 });
 
@@ -215,6 +234,8 @@ describe('appendPresentationAnnotations', () => {
 		expect(result).toContain("circle: 'o'");
 		expect(result).toContain("laser: 'l'");
 		expect(result).toContain('Clear annotations');
+		expect(result).toContain('isMobileViewOnlyDevice');
+		expect(result).toContain('(hover: none) and (pointer: coarse)');
 		expect(result).toContain('bindViewportWheelPanAndGestureGuard');
 		expect(result).toContain('bindMouseDragViewportPan');
 		expect(result).toContain('bindGestureNavigationGuard');

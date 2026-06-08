@@ -45,18 +45,204 @@ export function appendMobileTouchNavigation(html: string): string {
 		return html;
 	}
 
-	const mobileNavigation = `<style id="${marker}">
+	const mobileNavigation = `<style id="${marker}-style">
 html, body {
   touch-action: pan-x pan-y pinch-zoom;
   -webkit-overflow-scrolling: touch;
 }
-</style>`;
+@media (hover: none) and (pointer: coarse) {
+  .bespoke-marp-parent,
+  .bespoke-marp-slide,
+  svg.bespoke-marp-slide {
+    touch-action: pan-x pan-y pinch-zoom !important;
+  }
+  .bespoke-marp-parent > .bespoke-marp-osc {
+    position: fixed !important;
+    left: 50% !important;
+    right: auto !important;
+    bottom: 50px !important;
+    z-index: 2147483001 !important;
+    transform: translateX(-50%) !important;
+  }
+  .bespoke-marp-parent:not(.bespoke-marp-inactive) > .bespoke-marp-osc {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+  }
+  .marp-slides-annotation-canvas,
+  .marp-slides-laser-canvas,
+  .marp-slides-annotation-toolbar,
+  .marp-slides-annotation-controls {
+    display: none !important;
+  }
+}
+</style>
+<script id="${marker}-script">
+(${mobileViewRuntime.toString()})();
+</script>`;
 
 	if (html.includes('</body>')) {
 		return html.replace('</body>', `${mobileNavigation}</body>`);
 	}
 
 	return `${html}${mobileNavigation}`;
+}
+
+function mobileViewRuntime(): void {
+	const runtimeWindow = typeof window !== 'undefined' ? window : undefined;
+	const runtimeDocument = typeof document !== 'undefined' ? document : undefined;
+
+	if (!runtimeWindow || !runtimeDocument?.body || !isMobileViewOnlyDevice()) return;
+
+	let touchStart: { x: number; y: number } | null = null;
+	let multiTouchActive = false;
+	let recentPinchUntil = 0;
+	const swipeDistance = 44;
+	const tapDistance = 12;
+	const horizontalSwipeRatio = 1.25;
+	const recentPinchDelay = 350;
+
+	runtimeDocument.addEventListener('touchstart', (event) => {
+		if (isInteractiveTarget(event.target)) return;
+
+		if (event.touches.length > 1) {
+			multiTouchActive = true;
+			touchStart = null;
+			stopMarpTouchHandling(event);
+			return;
+		}
+
+		const touch = event.touches[0];
+		touchStart = { x: touch.clientX, y: touch.clientY };
+		stopMarpTouchHandling(event);
+	}, { capture: true, passive: true });
+
+	runtimeDocument.addEventListener('touchmove', (event) => {
+		if (isInteractiveTarget(event.target)) return;
+
+		if (event.touches.length > 1) {
+			multiTouchActive = true;
+			touchStart = null;
+			stopMarpTouchHandling(event);
+			return;
+		}
+
+		stopMarpTouchHandling(event);
+	}, { capture: true, passive: true });
+
+	runtimeDocument.addEventListener('touchend', (event) => {
+		if (isInteractiveTarget(event.target)) return;
+
+		if (event.touches.length > 0) return;
+
+		if (multiTouchActive) {
+			multiTouchActive = false;
+			recentPinchUntil = Date.now() + recentPinchDelay;
+			touchStart = null;
+			stopMarpTouchHandling(event);
+			return;
+		}
+
+		if (!touchStart || Date.now() < recentPinchUntil) {
+			touchStart = null;
+			return;
+		}
+
+		const touch = event.changedTouches[0];
+		const deltaX = touch.clientX - touchStart.x;
+		const deltaY = touch.clientY - touchStart.y;
+		const absX = Math.abs(deltaX);
+		const absY = Math.abs(deltaY);
+
+		if (!isViewportZoomed() && absX >= swipeDistance && absX > absY * horizontalSwipeRatio) {
+			navigate(deltaX < 0 ? 'next' : 'prev');
+			event.preventDefault();
+			stopMarpTouchHandling(event);
+		} else if (Math.hypot(deltaX, deltaY) <= tapDistance) {
+			showControls();
+		}
+
+		touchStart = null;
+	}, { capture: true, passive: false });
+
+	runtimeDocument.addEventListener('touchcancel', (event) => {
+		if (isInteractiveTarget(event.target)) return;
+
+		touchStart = null;
+		multiTouchActive = false;
+		stopMarpTouchHandling(event);
+	}, { capture: true, passive: true });
+
+	runtimeWindow.visualViewport?.addEventListener('resize', () => {
+		if (!isViewportZoomed()) recentPinchUntil = 0;
+	}, { passive: true });
+
+	function isMobileViewOnlyDevice() {
+		const hasCoarsePointer = !!runtimeWindow?.matchMedia?.('(hover: none) and (pointer: coarse)').matches;
+		const hasSmallTouchViewport = !!runtimeWindow
+			&& (runtimeWindow.navigator?.maxTouchPoints || 0) > 0
+			&& Math.min(runtimeWindow.innerWidth, runtimeWindow.innerHeight) <= 1024;
+
+		return hasCoarsePointer || hasSmallTouchViewport;
+	}
+
+	function isViewportZoomed() {
+		return (runtimeWindow?.visualViewport?.scale || 1) > 1.01;
+	}
+
+	function navigate(direction: 'prev' | 'next') {
+		showControls();
+
+		const control = runtimeDocument?.querySelector(`[data-bespoke-marp-osc="${direction}"]`) as HTMLElement | null;
+		if (control && !isDisabled(control)) {
+			control.click();
+			return;
+		}
+
+		navigateByHash(direction);
+	}
+
+	function navigateByHash(direction: 'prev' | 'next') {
+		if (!runtimeWindow) return;
+
+		const slides = Array.from(runtimeDocument?.querySelectorAll('.bespoke-marp-slide') || []);
+		if (slides.length === 0) return;
+
+		const active = runtimeDocument?.querySelector('.bespoke-marp-slide.bespoke-marp-active');
+		const currentIndex = active ? slides.indexOf(active) : getCurrentHashIndex();
+		const nextIndex = Math.max(0, Math.min(slides.length - 1, currentIndex + (direction === 'next' ? 1 : -1)));
+		if (nextIndex === currentIndex) return;
+
+		runtimeWindow.location.hash = String(nextIndex + 1);
+	}
+
+	function getCurrentHashIndex() {
+		const hashIndex = Number.parseInt(runtimeWindow?.location.hash.replace(/^#/, '') || '', 10);
+		return Number.isFinite(hashIndex) ? Math.max(0, hashIndex - 1) : 0;
+	}
+
+	function showControls() {
+		runtimeDocument?.querySelectorAll('.bespoke-marp-parent.bespoke-marp-inactive').forEach((parent) => {
+			parent.classList.remove('bespoke-marp-inactive');
+		});
+		runtimeDocument?.querySelectorAll('.bespoke-marp-osc').forEach((toolbar) => {
+			toolbar.removeAttribute('aria-hidden');
+		});
+	}
+
+	function stopMarpTouchHandling(event: TouchEvent) {
+		event.stopPropagation();
+	}
+
+	function isDisabled(element: HTMLElement) {
+		return element.hasAttribute('disabled') || element.getAttribute('aria-disabled') === 'true';
+	}
+
+	function isInteractiveTarget(target: EventTarget | null) {
+		const element = target as Element | null;
+		if (!element || typeof element.closest !== 'function') return false;
+
+		return Boolean(element.closest('button,a,input,select,textarea,[contenteditable="true"],.bespoke-marp-osc'));
+	}
 }
 
 export function appendPresentationAnnotations(html: string): string {
@@ -98,6 +284,8 @@ function presentationAnnotationsRuntime(rootInput?: Document | HTMLElement): voi
 		: runtimeDocument.body;
 	const scopedHost = host !== runtimeDocument.body;
 	const queryRoot = scopedHost ? host : runtimeDocument;
+
+	if (isMobileViewOnlyDevice()) return;
 
 	ensureStyle();
 
@@ -222,6 +410,14 @@ function presentationAnnotationsRuntime(rootInput?: Document | HTMLElement): voi
 		resizeCanvas();
 		updateActiveState();
 	});
+
+	function isMobileViewOnlyDevice() {
+		const hasCoarsePointer = !!runtimeWindow.matchMedia?.('(hover: none) and (pointer: coarse)').matches;
+		const hasSmallTouchViewport = (runtimeWindow.navigator?.maxTouchPoints || 0) > 0
+			&& Math.min(runtimeWindow.innerWidth, runtimeWindow.innerHeight) <= 1024;
+
+		return hasCoarsePointer || hasSmallTouchViewport;
+	}
 
 	function ensureStyle() {
 		if (runtimeDocument.getElementById(marker)) return;
